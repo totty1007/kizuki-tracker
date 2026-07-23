@@ -104,6 +104,12 @@
   <!-- バックアップタブ -->
   <section id="tab-backup" class="tabpanel">
     <div class="panel">
+      <div class="section-title">Googleドライブ自動保存</div>
+      <div class="hint" id="driveStatus">未連携です。連携すると、Excel/CSV出力時に選んだフォルダへ自動アップロードされます。</div>
+      <button type="button" class="btn-secondary" id="driveConnectBtn" style="margin-top:10px;">Googleドライブと連携する(保存先フォルダを選択)</button>
+      <button type="button" class="btn-secondary" id="driveDisconnectBtn" style="display:none;">連携を解除</button>
+    </div>
+    <div class="panel">
       <div class="section-title">CSV出力(全件バックアップ)</div>
       <button type="button" class="btn-secondary" id="csvExportBtn">全件をCSV出力</button>
     </div>

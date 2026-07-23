@@ -52,6 +52,175 @@
   let entries = [];
   let storageAvailable = true;
 
+  // ---------- Google Drive direct upload (optional; falls back to shareOrDownload) ----------
+  const driveSync = (() => {
+    const CLIENT_ID = '614632344728-nub88bg4gt5ur7phspcqfraprrdgn0ck.apps.googleusercontent.com';
+    const API_KEY = 'AIzaSyCbJd8tJxRPRNMDla_2SGEzHArOyerap0M';
+    const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+
+    let tokenClient = null;
+    let accessToken = null;
+    let tokenExpiresAt = 0;
+    let gisReady = false;
+    let gapiReady = false;
+
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.async = true;
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('failed to load ' + src));
+        document.head.appendChild(s);
+      });
+    }
+
+    async function ensureGis() {
+      if (gisReady) return;
+      if (!(window.google && window.google.accounts && window.google.accounts.oauth2)) {
+        await loadScript('https://accounts.google.com/gsi/client');
+      }
+      tokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: CLIENT_ID,
+        scope: SCOPE,
+        callback: () => {},
+      });
+      gisReady = true;
+    }
+
+    async function ensureGapiPicker() {
+      if (gapiReady) return;
+      if (!window.gapi) {
+        await loadScript('https://apis.google.com/js/api.js');
+      }
+      await new Promise((resolve) => window.gapi.load('picker', resolve));
+      gapiReady = true;
+    }
+
+    function requestToken(interactive) {
+      return new Promise((resolve, reject) => {
+        tokenClient.callback = (resp) => {
+          if (resp.error) { reject(resp); return; }
+          accessToken = resp.access_token;
+          tokenExpiresAt = Date.now() + (resp.expires_in - 60) * 1000;
+          resolve(accessToken);
+        };
+        tokenClient.requestAccessToken({ prompt: interactive ? 'consent' : '' });
+      });
+    }
+
+    async function getToken(interactive) {
+      await ensureGis();
+      if (accessToken && Date.now() < tokenExpiresAt) return accessToken;
+      return requestToken(interactive);
+    }
+
+    async function pickFolder() {
+      await ensureGapiPicker();
+      const token = await getToken(true);
+      return new Promise((resolve) => {
+        const view = new window.google.picker.DocsView(window.google.picker.ViewId.FOLDERS)
+          .setIncludeFolders(true)
+          .setSelectFolderEnabled(true)
+          .setMimeTypes('application/vnd.google-apps.folder');
+        const picker = new window.google.picker.PickerBuilder()
+          .addView(view)
+          .setOAuthToken(token)
+          .setDeveloperKey(API_KEY)
+          .setCallback((data) => {
+            if (data.action === window.google.picker.Action.PICKED) {
+              const doc = data.docs[0];
+              resolve({ id: doc.id, name: doc.name });
+            } else if (data.action === window.google.picker.Action.CANCEL) {
+              resolve(null);
+            }
+          })
+          .build();
+        picker.setVisible(true);
+      });
+    }
+
+    async function connect() {
+      const folder = await pickFolder();
+      if (!folder) return null;
+      await idbStorage.set('driveFolderId', folder.id);
+      await idbStorage.set('driveFolderName', folder.name);
+      return folder;
+    }
+
+    async function disconnect() {
+      accessToken = null;
+      tokenExpiresAt = 0;
+      await idbStorage.set('driveFolderId', null);
+      await idbStorage.set('driveFolderName', null);
+    }
+
+    async function getFolderInfo() {
+      const id = await idbStorage.get('driveFolderId');
+      const name = await idbStorage.get('driveFolderName');
+      return id ? { id, name } : null;
+    }
+
+    function arrayBufferToBase64(buffer) {
+      let binary = '';
+      const bytes = new Uint8Array(buffer);
+      const chunkSize = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+      }
+      return btoa(binary);
+    }
+
+    async function uploadWithToken(token, folderId, blob, filename, mimeType) {
+      const metadata = { name: filename, parents: [folderId] };
+      const boundary = 'kizuki_tracker_boundary_314159265358979';
+      const base64Data = arrayBufferToBase64(await blob.arrayBuffer());
+      const body =
+        `--${boundary}\r\n` +
+        'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+        JSON.stringify(metadata) + '\r\n' +
+        `--${boundary}\r\n` +
+        `Content-Type: ${mimeType}\r\n` +
+        'Content-Transfer-Encoding: base64\r\n\r\n' +
+        base64Data + '\r\n' +
+        `--${boundary}--`;
+
+      return fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + token,
+          'Content-Type': `multipart/related; boundary=${boundary}`,
+        },
+        body,
+      });
+    }
+
+    async function upload(blob, filename, mimeType) {
+      const folder = await getFolderInfo();
+      if (!folder) return { ok: false, reason: 'not-configured' };
+
+      let token;
+      try {
+        token = await getToken(false);
+      } catch (e) {
+        return { ok: false, reason: 'auth-failed' };
+      }
+
+      try {
+        let res = await uploadWithToken(token, folder.id, blob, filename, mimeType);
+        if (!res.ok && res.status === 401) {
+          token = await getToken(true);
+          res = await uploadWithToken(token, folder.id, blob, filename, mimeType);
+        }
+        return res.ok ? { ok: true, folderName: folder.name } : { ok: false, reason: 'upload-failed' };
+      } catch (e) {
+        return { ok: false, reason: 'network-error' };
+      }
+    }
+
+    return { connect, disconnect, getFolderInfo, upload };
+  })();
+
   // ---------- Utilities ----------
   function genId() {
     return 'e' + Date.now() + String(Math.floor(Math.random() * 1000)).padStart(3, '0');
@@ -393,7 +562,7 @@
     const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const filename = `${filePrefix}まとめ_${formatYYYYMMDD(rangeStart)}-${formatYYYYMMDD(rangeEnd)}.xlsx`;
-    await shareOrDownload(blob, filename, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    await saveExportFile(blob, filename, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   }
 
   function initExportTab() {
@@ -474,7 +643,7 @@
     const csv = buildCsv();
     const blob = new Blob([csv], { type: 'text/csv' });
     const filename = `気付き申し送り_backup_${formatYYYYMMDD(new Date())}.csv`;
-    await shareOrDownload(blob, filename, 'text/csv');
+    await saveExportFile(blob, filename, 'text/csv');
   }
 
   async function handleCsvImport(file) {
@@ -532,6 +701,49 @@
     });
   }
 
+  // ---------- Save entry point: try Drive auto-upload first, then fall back to share/download ----------
+  async function saveExportFile(blob, filename, mimeType) {
+    const result = await driveSync.upload(blob, filename, mimeType);
+    if (result.ok) {
+      showToast(`「${result.folderName}」に自動保存しました`);
+      return;
+    }
+    await shareOrDownload(blob, filename, mimeType);
+  }
+
+  async function refreshDriveStatus() {
+    const statusEl = document.getElementById('driveStatus');
+    const connectBtn = document.getElementById('driveConnectBtn');
+    const disconnectBtn = document.getElementById('driveDisconnectBtn');
+    const folder = await driveSync.getFolderInfo();
+    if (folder) {
+      statusEl.textContent = `連携中: 「${folder.name}」フォルダへ自動保存されます`;
+      connectBtn.textContent = '保存先フォルダを変更する';
+      disconnectBtn.style.display = 'block';
+    } else {
+      statusEl.textContent = '未連携です。連携すると、Excel/CSV出力時に選んだフォルダへ自動アップロードされます。';
+      connectBtn.textContent = 'Googleドライブと連携する(保存先フォルダを選択)';
+      disconnectBtn.style.display = 'none';
+    }
+  }
+
+  function initDriveTab() {
+    document.getElementById('driveConnectBtn').addEventListener('click', async () => {
+      try {
+        const folder = await driveSync.connect();
+        if (folder) showToast(`「${folder.name}」と連携しました`);
+      } catch (e) {
+        showToast('連携に失敗しました。もう一度お試しください');
+      }
+      await refreshDriveStatus();
+    });
+    document.getElementById('driveDisconnectBtn').addEventListener('click', async () => {
+      await driveSync.disconnect();
+      showToast('連携を解除しました');
+      await refreshDriveStatus();
+    });
+  }
+
   // ---------- Common save/share ----------
   async function shareOrDownload(blob, filename, mimeType) {
     try {
@@ -572,12 +784,14 @@
     initListFilters();
     initExportTab();
     initBackupTab();
+    initDriveTab();
 
     document.getElementById('submitBtn').addEventListener('click', handleSubmit);
 
     await loadEntries();
     renderList();
     renderTotalCount();
+    await refreshDriveStatus();
 
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
       navigator.serviceWorker.register('sw.js').catch(() => {});
