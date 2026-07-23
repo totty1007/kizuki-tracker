@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kizuki-tracker-v1';
+const CACHE_NAME = 'kizuki-tracker-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -9,6 +9,9 @@ const ASSETS = [
   './icons/icon-192.png',
   './icons/icon-512.png',
 ];
+
+// Rarely-changing static assets: safe to serve cache-first.
+const CACHE_FIRST_PATTERNS = [/\/vendor\//, /\/icons\//];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -26,16 +29,28 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((response) => {
-        if (response.ok && response.type === 'basic') {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
+  if (new URL(event.request.url).origin !== self.location.origin) return;
+
+  const isCacheFirst = CACHE_FIRST_PATTERNS.some((re) => re.test(event.request.url));
+
+  if (isCacheFirst) {
+    event.respondWith(
+      caches.match(event.request).then((cached) => cached || fetch(event.request).then((response) => {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
         return response;
-      }).catch(() => cached);
-    })
+      }))
+    );
+    return;
+  }
+
+  // App shell files (html/css/js): network-first so updates are picked up
+  // immediately when online, falling back to cache when offline.
+  event.respondWith(
+    fetch(event.request).then((response) => {
+      const clone = response.clone();
+      caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+      return response;
+    }).catch(() => caches.match(event.request))
   );
 });
