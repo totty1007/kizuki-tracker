@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>気付き・申し送りトラッカー</title>
+<meta name="theme-color" content="#2f6fed">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <div id="warningBanner" class="warning-banner" style="display:none;">
+    この端末では自動保存が使えません。データは画面を閉じると消える可能性があります。バックアップタブからCSV出力してデータを守ってください。
+  </div>
+
+  <nav class="tabbar">
+    <button type="button" class="tab-btn active" data-tab="input">入力</button>
+    <button type="button" class="tab-btn" data-tab="list">一覧</button>
+    <button type="button" class="tab-btn" data-tab="export">出力</button>
+    <button type="button" class="tab-btn" data-tab="backup">バックアップ</button>
+  </nav>
+
+  <!-- 入力タブ -->
+  <section id="tab-input" class="tabpanel active">
+    <div class="panel">
+      <div class="field">
+        <label for="storeSelect">対象店舗</label>
+        <select id="storeSelect"></select>
+      </div>
+
+      <div class="field">
+        <label>種別</label>
+        <div class="segment" id="typeSegment">
+          <button type="button" data-value="気付き" class="selected sel-blue">気付き</button>
+          <button type="button" data-value="申し送り" class="sel-red">申し送り</button>
+        </div>
+      </div>
+
+      <div class="field" id="statusField" style="display:none;">
+        <label>対応状況</label>
+        <div class="segment" id="statusSegment">
+          <button type="button" data-value="未対応" class="selected sel-red">未対応</button>
+          <button type="button" data-value="対応済み" class="sel-green">対応済み</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>重要度</label>
+        <div class="segment" id="importanceSegment">
+          <button type="button" data-value="通常" class="selected sel-gray">通常</button>
+          <button type="button" data-value="要注意" class="sel-yellow">要注意</button>
+          <button type="button" data-value="緊急" class="sel-red">緊急</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="contentInput">内容</label>
+        <textarea id="contentInput" placeholder="誰からの情報かなど、あれば内容欄に記載"></textarea>
+      </div>
+
+      <button type="button" class="btn-primary" id="submitBtn">この内容を記録する</button>
+    </div>
+  </section>
+
+  <!-- 一覧タブ -->
+  <section id="tab-list" class="tabpanel">
+    <div class="filter-row">
+      <select id="filterStore"></select>
+      <select id="filterType">
+        <option value="">種別:すべて</option>
+        <option value="気付き">気付き</option>
+        <option value="申し送り">申し送り</option>
+      </select>
+      <select id="filterStatus">
+        <option value="">対応:すべて</option>
+        <option value="未対応">未対応のみ</option>
+        <option value="対応済み">対応済みのみ</option>
+      </select>
+    </div>
+    <div id="entryList"></div>
+  </section>
+
+  <!-- 出力タブ -->
+  <section id="tab-export" class="tabpanel">
+    <div class="panel">
+      <div class="section-title">週次出力</div>
+      <button type="button" class="btn-secondary" id="weeklyExportBtn">今週分をExcel出力</button>
+      <div class="hint">本日を含む直近7日間(ローリング7日)を出力します。</div>
+    </div>
+    <div class="panel">
+      <div class="section-title">期間指定出力(隔週報告など)</div>
+      <div class="date-range-row">
+        <input type="date" id="rangeStart">
+        <span>〜</span>
+        <input type="date" id="rangeEnd">
+      </div>
+      <button type="button" class="btn-secondary" id="rangeExportBtn" style="margin-top:14px;">指定期間をExcel出力</button>
+    </div>
+  </section>
+
+  <!-- バックアップタブ -->
+  <section id="tab-backup" class="tabpanel">
+    <div class="panel">
+      <div class="section-title">CSV出力(全件バックアップ)</div>
+      <button type="button" class="btn-secondary" id="csvExportBtn">全件をCSV出力</button>
+    </div>
+    <div class="panel">
+      <div class="section-title">CSV復元(インポート)</div>
+      <input type="file" id="csvImportInput" accept=".csv">
+      <div class="hint">既存データを上書きせず、IDが重複しない行のみ追加します。</div>
+    </div>
+    <div class="total-count" id="totalCount"></div>
+  </section>
+</div>
+
+<div id="toast"></div>
+
+<script src="vendor/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
