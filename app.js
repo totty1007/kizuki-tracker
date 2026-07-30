@@ -1,7 +1,24 @@
 (() => {
   'use strict';
 
-  const STORES = ['成城学園前', 'イオン新浦安', '蒲田', '町田', '旗の台', '京急蒲田', '金沢文庫', 'NC新浦安', 'その他', '全体'];
+  const AREA_ORDER = ['第1エリア', '第2エリア', '第3エリア', '第4エリア', '第5エリア', '第6エリア', '九州北エリア', '九州南エリア'];
+  const AREA_STORES = {
+    '第1エリア': ['葛西駅前', '妙典駅前', 'IY木場', '船堀TB', '門前仲町', 'アリオ葛西', '南砂町スナモ', 'イオン八千代緑が丘'],
+    '第2エリア': ['瑞江', '本八幡', '平井', 'IY四街道', 'ユニモちはら台', 'イオンマリンピア', 'アリオ蘇我', 'アリオ北砂'],
+    '第3エリア': ['曳舟', '綾瀬', 'FP八潮', 'AM新鎌ケ谷', 'イオン新松戸', '北千住', '松戸西口', 'イオン水戸内原'],
+    '第4エリア': ['あさか台', 'PW東松山', 'ときわ台', 'LG川口', 'ステラタウン', 'アリオ鷲宮', 'イオン上尾', '新所沢'],
+    '第5エリア': ['西国分寺', '保谷', 'ひばりヶ丘', '清瀬', '千歳烏山', '入間', '調布', '東久留米', 'FP若葉台'],
+    '第6エリア': ['成城学園前', 'イオン新浦安', '蒲田', '町田', '旗の台', '京急蒲田', '金沢文庫', 'NC新浦安'],
+    '九州北エリア': ['みらい長崎', 'イオン佐賀大和', 'イオン三光', 'おのだサンパーク', 'サンリブ小倉'],
+    '九州南エリア': ['イオン都城', 'イオン宮崎', 'イオン延岡SC', '宮交シティ'],
+  };
+  const DEFAULT_AREA = '第6エリア';
+  let currentArea = DEFAULT_AREA;
+  let STORES = [];
+
+  function storesForArea(area) {
+    return [...(AREA_STORES[area] || AREA_STORES[DEFAULT_AREA]), 'その他', '全体'];
+  }
 
   // ---------- IndexedDB storage (replaces window.storage from Claude Artifacts) ----------
   const idbStorage = (() => {
@@ -307,8 +324,9 @@
   let selectedStatus = '未対応';
   let selectedImportance = '通常';
 
-  function initStoreSelects() {
+  function rebuildStoreSelects() {
     const storeSelect = document.getElementById('storeSelect');
+    storeSelect.innerHTML = '';
     STORES.forEach(s => {
       const opt = document.createElement('option');
       opt.value = s;
@@ -317,6 +335,7 @@
     });
 
     const filterStore = document.getElementById('filterStore');
+    filterStore.innerHTML = '';
     const allOpt = document.createElement('option');
     allOpt.value = '';
     allOpt.textContent = '店舗:すべて';
@@ -326,6 +345,30 @@
       opt.value = s;
       opt.textContent = s;
       filterStore.appendChild(opt);
+    });
+  }
+
+  async function initAreaSelect() {
+    const areaSelect = document.getElementById('areaSelect');
+    AREA_ORDER.forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a;
+      opt.textContent = a;
+      areaSelect.appendChild(opt);
+    });
+
+    const saved = await idbStorage.get('currentArea');
+    currentArea = AREA_ORDER.includes(saved) ? saved : DEFAULT_AREA;
+    areaSelect.value = currentArea;
+    STORES = storesForArea(currentArea);
+
+    areaSelect.addEventListener('change', async () => {
+      currentArea = areaSelect.value;
+      STORES = storesForArea(currentArea);
+      await idbStorage.set('currentArea', currentArea);
+      rebuildStoreSelects();
+      renderList();
+      showToast(`担当エリアを「${currentArea}」に変更しました`);
     });
   }
 
@@ -485,22 +528,28 @@
     target.sort((a, b) => {
       const so = storeOrder(a.store) - storeOrder(b.store);
       if (so !== 0) return so;
+      if (a.store !== b.store) return a.store < b.store ? -1 : 1;
       return new Date(a.datetime).getTime() - new Date(b.datetime).getTime();
     });
 
     // --- サマリーシート ---
+    // エリア切替後は過去の担当エリアの店舗名がSTORESに含まれないため、
+    // 実データに登場する店舗名も必ずMapに含めて集計漏れを防ぐ
     const summaryMap = new Map();
     STORES.forEach(s => summaryMap.set(s, { store: s, kizuki: 0, moushiokuri: 0, kinkyu: 0, mitaiou: 0 }));
     target.forEach(e => {
+      if (!summaryMap.has(e.store)) {
+        summaryMap.set(e.store, { store: e.store, kizuki: 0, moushiokuri: 0, kinkyu: 0, mitaiou: 0 });
+      }
       const row = summaryMap.get(e.store);
-      if (!row) return;
       if (e.type === '気付き') row.kizuki++;
       if (e.type === '申し送り') row.moushiokuri++;
       if (e.importance === '緊急') row.kinkyu++;
       if (e.type === '申し送り' && e.status === '未対応') row.mitaiou++;
     });
 
-    const summaryRows = STORES.map(s => summaryMap.get(s)).filter(r => r.kizuki + r.moushiokuri > 0);
+    const orderedStoreNames = [...STORES, ...[...summaryMap.keys()].filter(s => !STORES.includes(s))];
+    const summaryRows = orderedStoreNames.map(s => summaryMap.get(s)).filter(r => r.kizuki + r.moushiokuri > 0);
     const totalRow = summaryRows.reduce((acc, r) => ({
       store: '合計',
       kizuki: acc.kizuki + r.kizuki,
@@ -779,7 +828,8 @@
   // ---------- Init ----------
   async function init() {
     initTabs();
-    initStoreSelects();
+    await initAreaSelect();
+    rebuildStoreSelects();
     initSegments();
     initListFilters();
     initExportTab();
