@@ -21,6 +21,7 @@
     <button type="button" class="tab-btn" data-tab="list">一覧</button>
     <button type="button" class="tab-btn" data-tab="export">出力</button>
     <button type="button" class="tab-btn" data-tab="backup">バックアップ</button>
+    <button type="button" class="tab-btn" data-tab="settings">設定</button>
   </nav>
 
   <!-- 入力タブ -->
@@ -124,6 +125,25 @@
       <div class="hint">既存データを上書きせず、IDが重複しない行のみ追加します。</div>
     </div>
     <div class="total-count" id="totalCount"></div>
+  </section>
+
+  <!-- 設定タブ -->
+  <section id="tab-settings" class="tabpanel">
+    <div class="panel">
+      <div class="section-title">エリア・店舗の設定</div>
+      <div class="hint">
+        エリア編成の変更に合わせて、エリア名・店舗名・並び順を手動で編集できます。
+        ここでの編集は「入力」タブの選択肢に反映されるだけで、記録済みの気付き・申し送りデータが
+        書き換わったり消えたりすることはありません。
+      </div>
+    </div>
+    <div id="areaCardList"></div>
+    <div class="panel">
+      <button type="button" class="btn-secondary" id="addAreaBtn">+ エリアを追加</button>
+      <button type="button" class="btn-primary" id="saveAreaConfigBtn" style="margin-top:10px;">この内容で保存する</button>
+      <button type="button" class="btn-secondary" id="resetAreaConfigBtn" style="margin-top:10px;">初期設定に戻す</button>
+      <div class="hint">「初期設定に戻す」を押しても記録データ(気付き・申し送り)は削除されません。</div>
+    </div>
   </section>
 </div>
 
