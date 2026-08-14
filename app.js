@@ -260,16 +260,18 @@
     // 複数エリアで同じ連携フォルダを共有しても、出力ファイルが混ざらないようにするため。
     // セッション内キャッシュのみ(IndexedDBには保存しない): エリア構成は今後も変わりうるため、
     // 毎回「今のエリア名」で検索/作成することで常に最新のエリア名のフォルダに揃える。
-    const areaFolderCache = new Map();
+    //
+    // キャッシュには「解決済みのID」ではなく「進行中のPromise」を入れる。
+    // 週次出力とCSV出力をほぼ同時に押した場合など、findOrCreateAreaFolderが
+    // 短時間に複数回呼ばれても、2回目以降は1回目の検索/作成が終わるのを待って
+    // 同じフォルダIDを使い回す(同名フォルダが複数できてしまうのを防ぐ)。
+    const areaFolderPromiseCache = new Map();
 
     function escapeForDriveQuery(name) {
       return name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     }
 
-    async function findOrCreateAreaFolder(token, baseFolderId, areaName) {
-      const cacheKey = baseFolderId + '::' + areaName;
-      if (areaFolderCache.has(cacheKey)) return areaFolderCache.get(cacheKey);
-
+    async function findOrCreateAreaFolderUncached(token, baseFolderId, areaName) {
       const q = `'${baseFolderId}' in parents and name = '${escapeForDriveQuery(areaName)}' `
         + `and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
       const listRes = await fetch(
@@ -279,7 +281,6 @@
       if (listRes.ok) {
         const listData = await listRes.json();
         if (listData.files && listData.files.length > 0) {
-          areaFolderCache.set(cacheKey, listData.files[0].id);
           return listData.files[0].id;
         }
       }
@@ -295,8 +296,21 @@
       });
       if (!createRes.ok) throw new Error('area folder creation failed: ' + createRes.status);
       const created = await createRes.json();
-      areaFolderCache.set(cacheKey, created.id);
       return created.id;
+    }
+
+    function findOrCreateAreaFolder(token, baseFolderId, areaName) {
+      const cacheKey = baseFolderId + '::' + areaName;
+      if (areaFolderPromiseCache.has(cacheKey)) return areaFolderPromiseCache.get(cacheKey);
+
+      const promise = findOrCreateAreaFolderUncached(token, baseFolderId, areaName)
+        .catch((e) => {
+          // 失敗した場合はキャッシュから外し、次回の呼び出しで再挑戦できるようにする
+          areaFolderPromiseCache.delete(cacheKey);
+          throw e;
+        });
+      areaFolderPromiseCache.set(cacheKey, promise);
+      return promise;
     }
 
     async function upload(blob, filename, mimeType, areaName) {
