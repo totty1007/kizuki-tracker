@@ -256,7 +256,50 @@
       });
     }
 
-    async function upload(blob, filename, mimeType) {
+    // 選んだ連携フォルダの直下に、エリアごとのサブフォルダを自動作成/再利用する。
+    // 複数エリアで同じ連携フォルダを共有しても、出力ファイルが混ざらないようにするため。
+    // セッション内キャッシュのみ(IndexedDBには保存しない): エリア構成は今後も変わりうるため、
+    // 毎回「今のエリア名」で検索/作成することで常に最新のエリア名のフォルダに揃える。
+    const areaFolderCache = new Map();
+
+    function escapeForDriveQuery(name) {
+      return name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    }
+
+    async function findOrCreateAreaFolder(token, baseFolderId, areaName) {
+      const cacheKey = baseFolderId + '::' + areaName;
+      if (areaFolderCache.has(cacheKey)) return areaFolderCache.get(cacheKey);
+
+      const q = `'${baseFolderId}' in parents and name = '${escapeForDriveQuery(areaName)}' `
+        + `and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+      const listRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive`,
+        { headers: { Authorization: 'Bearer ' + token } }
+      );
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        if (listData.files && listData.files.length > 0) {
+          areaFolderCache.set(cacheKey, listData.files[0].id);
+          return listData.files[0].id;
+        }
+      }
+
+      const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: areaName,
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: [baseFolderId],
+        }),
+      });
+      if (!createRes.ok) throw new Error('area folder creation failed: ' + createRes.status);
+      const created = await createRes.json();
+      areaFolderCache.set(cacheKey, created.id);
+      return created.id;
+    }
+
+    async function upload(blob, filename, mimeType, areaName) {
       const folder = await getFolderInfo();
       if (!folder) return { ok: false, reason: 'not-configured' };
 
@@ -268,12 +311,26 @@
       }
 
       try {
-        let res = await uploadWithToken(token, folder.id, blob, filename, mimeType);
+        let targetFolderId = folder.id;
+        let targetLabel = folder.name;
+        if (areaName) {
+          try {
+            targetFolderId = await findOrCreateAreaFolder(token, folder.id, areaName);
+            targetLabel = `${folder.name}/${areaName}`;
+          } catch (e) {
+            // サブフォルダの作成/検索に失敗した場合は、連携フォルダ直下へフォールバック
+            // (アップロード自体を失敗させて記録データを失うことがないようにする)
+            targetFolderId = folder.id;
+            targetLabel = folder.name;
+          }
+        }
+
+        let res = await uploadWithToken(token, targetFolderId, blob, filename, mimeType);
         if (!res.ok && res.status === 401) {
           token = await getToken(true);
-          res = await uploadWithToken(token, folder.id, blob, filename, mimeType);
+          res = await uploadWithToken(token, targetFolderId, blob, filename, mimeType);
         }
-        return res.ok ? { ok: true, folderName: folder.name } : { ok: false, reason: 'upload-failed' };
+        return res.ok ? { ok: true, folderName: targetLabel } : { ok: false, reason: 'upload-failed' };
       } catch (e) {
         return { ok: false, reason: 'network-error' };
       }
@@ -300,6 +357,12 @@
 
   function formatYYYYMMDD(d) {
     return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`;
+  }
+
+  // 複数エリアで出力フォルダを共有しても、ファイル名でどのエリアの出力か判別できるようにする。
+  // ファイル名に使えない文字だけ念のため置換(エリア名は自由入力のため)。
+  function sanitizeForFilename(name) {
+    return String(name).replace(/[\\/:*?"<>|]/g, '_');
   }
 
   let toastTimer = null;
@@ -419,6 +482,7 @@
       currentArea = areaSelect.value;
       STORES = storesForArea(currentArea);
       await idbStorage.set('currentArea', currentArea);
+      await refreshDriveStatus();
       rebuildStoreSelects();
       renderList();
       showToast(`担当エリアを「${currentArea}」に変更しました`);
@@ -439,6 +503,7 @@
     STORES = storesForArea(currentArea);
     rebuildStoreSelects();
     renderList();
+    await refreshDriveStatus();
     return switchedTo;
   }
 
@@ -680,7 +745,7 @@
     }
     const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    const filename = `${filePrefix}まとめ_${formatYYYYMMDD(rangeStart)}-${formatYYYYMMDD(rangeEnd)}.xlsx`;
+    const filename = `${filePrefix}まとめ_${sanitizeForFilename(currentArea)}_${formatYYYYMMDD(rangeStart)}-${formatYYYYMMDD(rangeEnd)}.xlsx`;
     await saveExportFile(blob, filename, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   }
 
@@ -761,7 +826,7 @@
     }
     const csv = buildCsv();
     const blob = new Blob([csv], { type: 'text/csv' });
-    const filename = `気付き申し送り_backup_${formatYYYYMMDD(new Date())}.csv`;
+    const filename = `気付き申し送り_backup_${sanitizeForFilename(currentArea)}_${formatYYYYMMDD(new Date())}.csv`;
     await saveExportFile(blob, filename, 'text/csv');
   }
 
@@ -822,7 +887,7 @@
 
   // ---------- Save entry point: try Drive auto-upload first, then fall back to share/download ----------
   async function saveExportFile(blob, filename, mimeType) {
-    const result = await driveSync.upload(blob, filename, mimeType);
+    const result = await driveSync.upload(blob, filename, mimeType, currentArea);
     if (result.ok) {
       showToast(`「${result.folderName}」に自動保存しました`);
       return;
@@ -836,11 +901,11 @@
     const disconnectBtn = document.getElementById('driveDisconnectBtn');
     const folder = await driveSync.getFolderInfo();
     if (folder) {
-      statusEl.textContent = `連携中: 「${folder.name}」フォルダへ自動保存されます`;
+      statusEl.textContent = `連携中: 「${folder.name}」フォルダ内の「${currentArea}」フォルダへ自動保存されます(なければ自動作成)`;
       connectBtn.textContent = '保存先フォルダを変更する';
       disconnectBtn.style.display = 'block';
     } else {
-      statusEl.textContent = '未連携です。連携すると、Excel/CSV出力時に選んだフォルダへ自動アップロードされます。';
+      statusEl.textContent = '未連携です。連携すると、Excel/CSV出力時に選んだフォルダ内の「エリア名」フォルダへ自動アップロードされます(エリアフォルダは自動作成)。';
       connectBtn.textContent = 'Googleドライブと連携する(保存先フォルダを選択)';
       disconnectBtn.style.display = 'none';
     }
