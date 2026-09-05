@@ -112,8 +112,18 @@
     <div class="panel">
       <div class="section-title">Googleドライブ自動保存</div>
       <div class="hint" id="driveStatus">未連携です。連携すると、Excel/CSV出力時に選んだフォルダ内の「エリア名」フォルダへ自動アップロードされます(エリアフォルダは自動作成)。</div>
+      <div class="hint drive-folder-id" id="driveFolderIdLabel" style="display:none;"></div>
       <button type="button" class="btn-secondary" id="driveConnectBtn" style="margin-top:10px;">Googleドライブと連携する(保存先フォルダを選択)</button>
       <button type="button" class="btn-secondary" id="driveDisconnectBtn" style="display:none;">連携を解除</button>
+      <details class="drive-manual">
+        <summary>フォルダIDを直接入力して連携する</summary>
+        <div class="hint">
+          連携が切れたときは、保存先フォルダのIDを貼り付ければ、ドライブの深い階層を探し直さずに復旧できます。
+          IDはGoogleドライブでそのフォルダを開いたときのURLの <code>/folders/</code> より後ろの部分です。URLをそのまま貼り付けても構いません。
+        </div>
+        <input type="text" id="driveFolderIdInput" placeholder="フォルダIDまたはドライブのURL" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <button type="button" class="btn-secondary" id="driveFolderIdApplyBtn">このIDで連携する</button>
+      </details>
     </div>
     <div class="panel">
       <div class="section-title">CSV出力(全件バックアップ)</div>

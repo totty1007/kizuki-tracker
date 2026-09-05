@@ -308,3 +308,31 @@ textarea { resize: vertical; min-height: 100px; line-height: 1.5; }
   text-align: center;
 }
 #toast.show { opacity: 1; }
+
+/* 連携中の保存先フォルダIDと、ID直接入力による復旧欄 */
+.drive-folder-id {
+  margin-top: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  user-select: all;
+}
+.drive-manual {
+  margin-top: 14px;
+}
+.drive-manual > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: #4a5568;
+}
+.drive-manual .hint {
+  margin-top: 8px;
+}
+.drive-manual input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 8px;
+}
+.drive-manual .btn-secondary {
+  margin-top: 8px;
+}

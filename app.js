@@ -125,6 +125,23 @@
     let gisReady = false;
     let gapiReady = false;
 
+    // 連携情報(保存先フォルダID)は IndexedDB と localStorage の両方に持つ。
+    // ブラウザのストレージ自動削除(iOS Safari の数日ルール、容量逼迫時の退避など)で
+    // 片方が消えても、もう片方から自動復元して「勝手に未連携に戻る」のを防ぐため。
+    const LS_FOLDER_ID = 'kizuki.driveFolderId';
+    const LS_FOLDER_NAME = 'kizuki.driveFolderName';
+
+    function lsGet(key) {
+      try { return window.localStorage.getItem(key); } catch (e) { return null; }
+    }
+
+    function lsSet(key, value) {
+      try {
+        if (value === null || value === undefined) window.localStorage.removeItem(key);
+        else window.localStorage.setItem(key, value);
+      } catch (e) { /* プライベートモード等で使えなくても致命的ではない */ }
+    }
+
     function loadScript(src) {
       return new Promise((resolve, reject) => {
         const s = document.createElement('script');
@@ -176,16 +193,59 @@
       return requestToken(interactive);
     }
 
-    async function pickFolder() {
-      await ensureGapiPicker();
-      const token = await getToken(true);
-      return new Promise((resolve) => {
+    // フォルダ選択ビューを1つ作る。configure が失敗してもピッカー全体が
+    // 壊れないよう、作れなかったビューは null を返して呼び出し側で捨てる。
+    function newFolderView(configure) {
+      try {
         const view = new window.google.picker.DocsView(window.google.picker.ViewId.FOLDERS)
           .setIncludeFolders(true)
           .setSelectFolderEnabled(true)
           .setMimeTypes('application/vnd.google-apps.folder');
-        const picker = new window.google.picker.PickerBuilder()
-          .addView(view)
+        if (configure) configure(view);
+        return view;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // 連携中フォルダの親フォルダIDを取る。ピッカーを「前回と同じ階層」で
+    // 開くために使う(⑰店舗状況のように深い場所でも開いた瞬間に目的地が並ぶ)。
+    async function getParentFolderId(token, folderId) {
+      try {
+        const res = await fetch(
+          'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(folderId) + '?fields=parents',
+          { headers: { Authorization: 'Bearer ' + token } }
+        );
+        if (!res.ok) return null;
+        const data = await res.json();
+        return (data.parents && data.parents[0]) || null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function pickFolder() {
+      await ensureGapiPicker();
+      const token = await getToken(true);
+
+      // 前回の保存先が分かっていれば、その親フォルダを起点にしたビューを先頭に置く。
+      let parentId = null;
+      const current = await getFolderInfo();
+      if (current) parentId = await getParentFolderId(token, current.id);
+
+      const views = [];
+      if (parentId) {
+        views.push(newFolderView((v) => { v.setParent(parentId); v.setLabel('前回と同じ場所'); }));
+      }
+      // ドライブ側で保存先フォルダに★を付けておけば、ここから一発で選べる。
+      views.push(newFolderView((v) => { v.setStarred(true); v.setLabel('スター付き'); }));
+      views.push(newFolderView((v) => { v.setLabel('マイドライブ'); }));
+
+      const usableViews = views.filter(Boolean);
+      if (usableViews.length === 0) usableViews.push(newFolderView());
+
+      return new Promise((resolve) => {
+        const builder = new window.google.picker.PickerBuilder()
           .setOAuthToken(token)
           .setDeveloperKey(API_KEY)
           .setCallback((data) => {
@@ -195,31 +255,112 @@
             } else if (data.action === window.google.picker.Action.CANCEL) {
               resolve(null);
             }
-          })
-          .build();
-        picker.setVisible(true);
+          });
+        usableViews.forEach((v) => { if (v) builder.addView(v); });
+        builder.build().setVisible(true);
       });
+    }
+
+    async function saveFolder(id, name) {
+      // 先に localStorage を書く。IndexedDB 側が失敗しても控えが残るようにするため。
+      lsSet(LS_FOLDER_ID, id);
+      lsSet(LS_FOLDER_NAME, name || '');
+      try {
+        await idbStorage.set('driveFolderId', id);
+        await idbStorage.set('driveFolderName', name || '');
+      } catch (e) { /* localStorage 側だけでも次回起動時に復元できる */ }
     }
 
     async function connect() {
       const folder = await pickFolder();
       if (!folder) return null;
-      await idbStorage.set('driveFolderId', folder.id);
-      await idbStorage.set('driveFolderName', folder.name);
+      await saveFolder(folder.id, folder.name);
       return folder;
+    }
+
+    // 「フォルダID」そのものでも、ドライブのURLを貼り付けても受け付ける。
+    function extractFolderId(raw) {
+      if (!raw) return null;
+      const text = String(raw).trim();
+      const m = text.match(/\/folders\/([A-Za-z0-9_-]+)/);
+      if (m) return m[1];
+      return /^[A-Za-z0-9_-]{10,}$/.test(text) ? text : null;
+    }
+
+    // フォルダIDを直接指定して連携する。連携が切れたときに、深い階層の
+    // フォルダをピッカーで探し直さずに復旧するための入口。
+    // drive.file スコープでは一度ピッカーで選んだフォルダへのアクセス権が
+    // 残るため、IDさえ控えてあれば選び直さずに戻せる。
+    async function connectByFolderId(rawId) {
+      const id = extractFolderId(rawId);
+      if (!id) return { ok: false, reason: 'invalid-id' };
+
+      let token;
+      try {
+        token = await getToken(true);
+      } catch (e) {
+        return { ok: false, reason: 'auth-failed' };
+      }
+
+      let res;
+      try {
+        res = await fetch(
+          'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(id) + '?fields=id,name,mimeType',
+          { headers: { Authorization: 'Bearer ' + token } }
+        );
+      } catch (e) {
+        return { ok: false, reason: 'network-error' };
+      }
+      if (!res.ok) return { ok: false, reason: 'no-access' };
+
+      const meta = await res.json();
+      if (meta.mimeType !== 'application/vnd.google-apps.folder') {
+        return { ok: false, reason: 'not-a-folder' };
+      }
+      await saveFolder(meta.id, meta.name);
+      return { ok: true, folder: { id: meta.id, name: meta.name } };
     }
 
     async function disconnect() {
       accessToken = null;
       tokenExpiresAt = 0;
-      await idbStorage.set('driveFolderId', null);
-      await idbStorage.set('driveFolderName', null);
+      lsSet(LS_FOLDER_ID, null);
+      lsSet(LS_FOLDER_NAME, null);
+      try {
+        await idbStorage.set('driveFolderId', null);
+        await idbStorage.set('driveFolderName', null);
+      } catch (e) { /* 控えは既に消してあるので復活しない */ }
     }
 
     async function getFolderInfo() {
-      const id = await idbStorage.get('driveFolderId');
-      const name = await idbStorage.get('driveFolderName');
-      return id ? { id, name } : null;
+      let id = null;
+      let name = null;
+      try {
+        id = await idbStorage.get('driveFolderId');
+        name = await idbStorage.get('driveFolderName');
+      } catch (e) {
+        id = null;
+        name = null;
+      }
+
+      if (id) {
+        // IndexedDB を正として、控えが欠けていれば書き足しておく。
+        if (lsGet(LS_FOLDER_ID) !== id) {
+          lsSet(LS_FOLDER_ID, id);
+          lsSet(LS_FOLDER_NAME, name || '');
+        }
+        return { id, name, restored: false };
+      }
+
+      // IndexedDB 側が消えている場合は控えから復元する(勝手に未連携に戻る対策)。
+      const backupId = lsGet(LS_FOLDER_ID);
+      if (!backupId) return null;
+      const backupName = lsGet(LS_FOLDER_NAME) || '(保存先フォルダ)';
+      try {
+        await idbStorage.set('driveFolderId', backupId);
+        await idbStorage.set('driveFolderName', backupName);
+      } catch (e) { /* 書き戻せなくても今回の起動では使える */ }
+      return { id: backupId, name: backupName, restored: true };
     }
 
     function arrayBufferToBase64(buffer) {
@@ -350,8 +491,19 @@
       }
     }
 
-    return { connect, disconnect, getFolderInfo, upload };
+    return { connect, connectByFolderId, disconnect, getFolderInfo, upload };
   })();
+
+  // ブラウザによるストレージの自動削除(iOS Safari の数日ルール、容量逼迫時の退避など)を
+  // 避けるため、永続化を要求する。記録データと連携情報が勝手に消える事故を減らすのが目的。
+  // 拒否されても動作には影響しないので、失敗は握りつぶす。
+  async function requestPersistentStorage() {
+    try {
+      if (!navigator.storage || !navigator.storage.persist) return;
+      if (navigator.storage.persisted && await navigator.storage.persisted()) return;
+      await navigator.storage.persist();
+    } catch (e) { /* 未対応ブラウザでは何もしない */ }
+  }
 
   // ---------- Utilities ----------
   function genId() {
@@ -911,19 +1063,36 @@
 
   async function refreshDriveStatus() {
     const statusEl = document.getElementById('driveStatus');
+    const idEl = document.getElementById('driveFolderIdLabel');
     const connectBtn = document.getElementById('driveConnectBtn');
     const disconnectBtn = document.getElementById('driveDisconnectBtn');
     const folder = await driveSync.getFolderInfo();
     if (folder) {
       statusEl.textContent = `連携中: 「${folder.name}」フォルダ内の「${currentArea}」フォルダへ自動保存されます(なければ自動作成)`;
+      // 連携が切れたときの復旧キーになるので、フォルダIDは常に見える場所に出しておく。
+      idEl.textContent = `保存先フォルダID: ${folder.id}`;
+      idEl.style.display = 'block';
       connectBtn.textContent = '保存先フォルダを変更する';
       disconnectBtn.style.display = 'block';
+      if (folder.restored) {
+        showToast('連携情報が消えていたため、控えから自動復元しました');
+      }
     } else {
       statusEl.textContent = '未連携です。連携すると、Excel/CSV出力時に選んだフォルダ内の「エリア名」フォルダへ自動アップロードされます(エリアフォルダは自動作成)。';
+      idEl.textContent = '';
+      idEl.style.display = 'none';
       connectBtn.textContent = 'Googleドライブと連携する(保存先フォルダを選択)';
       disconnectBtn.style.display = 'none';
     }
   }
+
+  const DRIVE_ID_ERRORS = {
+    'invalid-id': 'フォルダIDの形式が正しくありません',
+    'auth-failed': 'Googleの認証に失敗しました',
+    'network-error': '通信に失敗しました。電波状況を確認してください',
+    'no-access': 'そのフォルダにアクセスできませんでした。「保存先フォルダを選択」から選び直してください',
+    'not-a-folder': 'フォルダではありません。フォルダのIDを指定してください',
+  };
 
   function initDriveTab() {
     document.getElementById('driveConnectBtn').addEventListener('click', async () => {
@@ -938,6 +1107,17 @@
     document.getElementById('driveDisconnectBtn').addEventListener('click', async () => {
       await driveSync.disconnect();
       showToast('連携を解除しました');
+      await refreshDriveStatus();
+    });
+    document.getElementById('driveFolderIdApplyBtn').addEventListener('click', async () => {
+      const input = document.getElementById('driveFolderIdInput');
+      const result = await driveSync.connectByFolderId(input.value);
+      if (result.ok) {
+        input.value = '';
+        showToast(`「${result.folder.name}」と連携しました`);
+      } else {
+        showToast(DRIVE_ID_ERRORS[result.reason] || '連携に失敗しました');
+      }
       await refreshDriveStatus();
     });
   }
@@ -1187,6 +1367,7 @@
   // ---------- Init ----------
   async function init() {
     initTabs();
+    await requestPersistentStorage();
     await loadAreaConfig();
     await initAreaSelect();
     rebuildStoreSelects();
