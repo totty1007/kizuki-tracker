@@ -1,6 +1,6 @@
 {
-  "name": "気付き・申し送りトラッカー",
-  "short_name": "気付きトラッカー",
+  "name": "Relay",
+  "short_name": "Relay",
   "description": "エリア8店舗の気付き・申し送りを記録し、Excel/CSVでまとめるツール",
   "start_url": "./index.html",
   "scope": "./",
