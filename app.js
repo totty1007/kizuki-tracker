@@ -1402,7 +1402,35 @@
     await refreshDriveStatus();
 
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-      navigator.serviceWorker.register('sw.js').catch(() => {});
+      const hadController = !!navigator.serviceWorker.controller;
+      let reloading = false;
+      // 新しいService Workerに切り替わったら自動で再読み込みして最新版にする。
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!hadController || reloading) return;
+        reloading = true;
+        window.location.reload();
+      });
+      navigator.serviceWorker.register('sw.js').then((reg) => {
+        // ホーム画面から開きっぱなしでも、アプリに戻るたびに更新を確認する。
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') reg.update().catch(() => {});
+        });
+        const btn = document.getElementById('appUpdateBtn');
+        if (btn) {
+          btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            try {
+              await reg.update();
+              showToast('最新版を確認しました。更新があれば自動で再読み込みします');
+              // 新版が無い場合でもキャッシュを避けて読み直す。
+              setTimeout(() => { if (!reloading) window.location.reload(); }, 1500);
+            } catch (e) {
+              showToast('更新の確認に失敗しました。通信状況を確認してください');
+              btn.disabled = false;
+            }
+          });
+        }
+      }).catch(() => {});
     }
   }
 
