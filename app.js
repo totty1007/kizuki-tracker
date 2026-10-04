@@ -183,7 +183,9 @@
           tokenExpiresAt = Date.now() + (resp.expires_in - 60) * 1000;
           resolve(accessToken);
         };
-        tokenClient.requestAccessToken({ prompt: interactive ? 'consent' : '' });
+        // 対話時は毎回アカウント選択画面を出す。'consent' だけだとブラウザで
+        // ログイン中のアカウントが自動で使われ、連携先アカウントを変えられない。
+        tokenClient.requestAccessToken({ prompt: interactive ? 'select_account consent' : '' });
       });
     }
 
@@ -271,7 +273,21 @@
       } catch (e) { /* localStorage 側だけでも次回起動時に復元できる */ }
     }
 
+    // メモリ上のトークンを捨て、可能なら失効させる。次回の認証でアカウントを選び直せる。
+    function dropToken() {
+      const old = accessToken;
+      accessToken = null;
+      tokenExpiresAt = 0;
+      try {
+        if (old && window.google && window.google.accounts && window.google.accounts.oauth2) {
+          window.google.accounts.oauth2.revoke(old, () => {});
+        }
+      } catch (e) { /* 失効に失敗しても次回の認証には影響しない */ }
+    }
+
     async function connect() {
+      // 保存先変更のたびにアカウント選択からやり直す(アカウント誤りの修正用)。
+      dropToken();
       const folder = await pickFolder();
       if (!folder) return null;
       await saveFolder(folder.id, folder.name);
@@ -297,6 +313,7 @@
 
       let token;
       try {
+        dropToken();
         token = await getToken(true);
       } catch (e) {
         return { ok: false, reason: 'auth-failed' };
@@ -322,8 +339,7 @@
     }
 
     async function disconnect() {
-      accessToken = null;
-      tokenExpiresAt = 0;
+      dropToken();
       lsSet(LS_FOLDER_ID, null);
       lsSet(LS_FOLDER_NAME, null);
       try {
